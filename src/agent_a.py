@@ -220,34 +220,78 @@ def _is_missing_model_error(exc: Exception) -> bool:
     return "model_not_found" in text or "does not exist" in text or "error code: 404" in text
 
 
-class FallbackChat:
-    """Bind tools on the first Groq model that still exists for this API key."""
+def _is_capacity_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "rate_limit" in text
+        or "error code: 429" in text
+        or "tokens per minute" in text
+        or "otpm" in text
+        or "request too large" in text
+    )
 
-    def __init__(self, preferred: str, api_key: str, tools: bool = True):
+
+class FallbackChat:
+    """Groq models first (capped max_tokens), then optional OpenRouter."""
+
+    def __init__(self, settings, tools: bool = True):
+        preferred = settings.groq_agent_model
         ordered = [preferred, *AGENT_MODEL_FALLBACKS]
-        self.models = list(dict.fromkeys(ordered))
-        self.api_key = api_key
+        self.groq_models = list(dict.fromkeys(ordered))
+        self.settings = settings
         self.tools = tools
         self.active = preferred
+        self.provider = "groq"
 
-    def _llm(self, model: str):
-        llm = ChatGroq(model=model, api_key=self.api_key, temperature=0.1)
+    def _groq(self, model: str):
+        llm = ChatGroq(
+            model=model,
+            api_key=self.settings.groq_api_key,
+            temperature=0.1,
+            max_tokens=self.settings.max_tokens,
+        )
+        return llm.bind_tools(ALL_TOOLS) if self.tools else llm
+
+    def _openrouter(self):
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=self.settings.openrouter_model,
+            api_key=self.settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            temperature=0.1,
+            max_tokens=self.settings.max_tokens,
+            default_headers={
+                "HTTP-Referer": "https://github.com/lavanblavan/Agentic_financial_Analyser",
+                "X-Title": "Agentic Financial Analyser",
+            },
+        )
         return llm.bind_tools(ALL_TOOLS) if self.tools else llm
 
     def invoke(self, messages):
         last_error: Exception | None = None
-        start = self.models.index(self.active) if self.active in self.models else 0
-        for model in self.models[start:] + self.models[:start]:
+        if self.settings.groq_api_key:
+            start = self.groq_models.index(self.active) if self.active in self.groq_models else 0
+            for model in self.groq_models[start:] + self.groq_models[:start]:
+                try:
+                    result = self._groq(model).invoke(messages)
+                    self.active = model
+                    self.provider = "groq"
+                    return result
+                except Exception as exc:
+                    if _is_missing_model_error(exc) or _is_capacity_error(exc):
+                        last_error = exc
+                        continue
+                    raise
+        if self.settings.openrouter_api_key:
             try:
-                result = self._llm(model).invoke(messages)
-                self.active = model
+                result = self._openrouter().invoke(messages)
+                self.active = self.settings.openrouter_model
+                self.provider = "openrouter"
                 return result
             except Exception as exc:
-                if _is_missing_model_error(exc):
-                    last_error = exc
-                    continue
-                raise
-        raise last_error or RuntimeError("No Groq chat model available")
+                last_error = exc
+        raise last_error or RuntimeError("No chat model available (Groq/OpenRouter)")
 
 
 def build_agent_a():
@@ -255,7 +299,7 @@ def build_agent_a():
     if not settings.llm_ready:
         raise LLMNotConfiguredError(missing_key_help(settings))
 
-    llm = FallbackChat(settings.groq_agent_model, settings.groq_api_key or "", tools=True)
+    llm = FallbackChat(settings, tools=True)
 
     def agent_node(state: AgentAState) -> dict[str, Any]:
         return {"messages": [llm.invoke(state["messages"])]}
@@ -282,11 +326,7 @@ def build_agent_a():
         payload = _extract_json_object(last_text)
         if payload is None:
             try:
-                synthesizer = FallbackChat(
-                    settings.groq_agent_model,
-                    settings.groq_api_key or "",
-                    tools=False,
-                )
+                synthesizer = FallbackChat(settings, tools=False)
                 reply = synthesizer.invoke(
                     [
                         SystemMessage(content=_system_prompt()),

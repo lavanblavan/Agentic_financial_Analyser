@@ -24,7 +24,9 @@ Each call is logged to `logs/agent_trace.jsonl` (name, inputs, truncated output,
 
 The LLM must pick tools at runtime. Do not hard-code a call sequence.
 
-Agent A uses `GROQ_AGENT_MODEL` (default `qwen/qwen3.6-27b`). Groq shut down `llama-3.3-70b-versatile` on 16 Aug 2026; retired IDs are remapped automatically. If Qwen is missing, the loop falls back to `openai/gpt-oss-120b` then `openai/gpt-oss-20b`.
+Agent A uses `openai/gpt-oss-20b` on Groq with `max_tokens=800` so free-tier OTPM (1000) is not exceeded. Qwen 3.6 preview rejects requests that ask for more than 1000 output tokens.
+
+Optional [OpenRouter](https://openrouter.ai/keys) fallback: set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL=openai/gpt-oss-20b:free`). The agent uses it if Groq returns 404 or 429.
 
 ## Local setup
 

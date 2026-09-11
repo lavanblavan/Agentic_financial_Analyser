@@ -1,4 +1,4 @@
-"""Small Groq JSON client. Same key-loading rules as Task 1."""
+"""JSON chat client: Groq first, optional OpenRouter on 429."""
 
 from __future__ import annotations
 
@@ -20,21 +20,56 @@ class GroqAPIError(RuntimeError):
 
 def call_groq_json(system_prompt: str, user_content: str, settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
-    if not settings.llm_ready:
-        raise LLMNotConfiguredError(
-            "No LLM key found. Local: set GROQ_API_KEY in .env. "
-            "Colab: add GROQ_API_KEY in Secrets and grant access."
+    last_error: Exception | None = None
+    if settings.groq_api_key:
+        try:
+            return _chat_json(
+                url="https://api.groq.com/openai/v1/chat/completions",
+                api_key=settings.groq_api_key,
+                model=settings.groq_model,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                max_tokens=settings.max_tokens,
+            )
+        except GroqAPIError as exc:
+            last_error = exc
+            if "429" not in str(exc) or not settings.openrouter_api_key:
+                raise
+    if settings.openrouter_api_key:
+        return _chat_json(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            api_key=settings.openrouter_api_key,
+            model=settings.openrouter_model,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            max_tokens=settings.max_tokens,
         )
+    if last_error:
+        raise last_error
+    raise LLMNotConfiguredError(
+        "No LLM key found. Local: set GROQ_API_KEY in .env "
+        "(optional OPENROUTER_API_KEY). Colab: add Secrets and grant access."
+    )
 
+
+def _chat_json(
+    url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+) -> dict[str, Any]:
     response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
+        url,
         headers={
-            "Authorization": f"Bearer {settings.groq_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         json={
-            "model": settings.groq_model,
+            "model": model,
             "temperature": 0.2,
+            "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -44,12 +79,12 @@ def call_groq_json(system_prompt: str, user_content: str, settings: Settings | N
         timeout=60,
     )
     if response.status_code >= 400:
-        raise GroqAPIError(_groq_error_message(response, settings.groq_api_key or ""))
+        raise GroqAPIError(_http_error_message(response, api_key))
     raw = response.json()["choices"][0]["message"]["content"]
     return json.loads(raw)
 
 
-def _groq_error_message(response: requests.Response, api_key: str) -> str:
+def _http_error_message(response: requests.Response, api_key: str) -> str:
     try:
         payload = response.json()
         detail = payload.get("error", {}).get("message") or str(payload)
@@ -58,7 +93,8 @@ def _groq_error_message(response: requests.Response, api_key: str) -> str:
     shape = groq_key_shape(api_key)
     if response.status_code == 401:
         return (
-            f"Groq 401 Unauthorized (key shape {shape}). "
-            "Create a new key at https://console.groq.com/keys."
+            f"HTTP 401 Unauthorized (key shape {shape}). "
+            "Create a Groq key at https://console.groq.com/keys "
+            "or an OpenRouter key at https://openrouter.ai/keys."
         )
-    return f"Groq HTTP {response.status_code}: {detail}"
+    return f"LLM HTTP {response.status_code}: {detail}"
