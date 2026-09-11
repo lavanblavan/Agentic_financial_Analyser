@@ -1,12 +1,15 @@
-# Task 3 — Agentic Financial Research Workflow
+# Agentic Financial Research Workflow
 
 Repo: [lavanblavan/Agentic_financial_Analyser](https://github.com/lavanblavan/Agentic_financial_Analyser.git)
 
-Multi-agent research system. Tools are reused from Task 1 ([Financial_AI](https://github.com/lavanblavan/Financial_AI.git)); the agent layer chooses when to call them.
+Tools are reused from Task 1 ([Financial_AI](https://github.com/lavanblavan/Financial_AI.git)); the agent layer chooses when to call them.
 
-Open the notebook in Colab:
+## Notebooks
 
-`https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task3.ipynb`
+| Task | Notebook | Colab |
+|---|---|---|
+| **Task 2** — Agent A + memory | `task2.ipynb` | [Open in Colab](https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task2.ipynb) |
+| **Task 3** — Agent A + B + memory | `task3.ipynb` | [Open in Colab](https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task3.ipynb) |
 
 Cell 1 clones this repo into `/content`, installs `requirements.txt`, then imports `src`. Opening a notebook from GitHub does **not** copy `src/` with it — the clone step is required.
 
@@ -41,17 +44,29 @@ copy .env.example .env
 
 Put `OPENROUTER_API_KEY` in `.env` (preferred). Optional: `GROQ_API_KEY` as fallback. Never commit `.env`.
 
-## Run Agent A (notebook)
+## Task 2 — Agent A + memory
 
-In `task3.ipynb` paste the assessment prompt and put a name or ticker in it:
+In `task2.ipynb` ask in plain language. Agent A reads the question and picks tools (news-only → `get_news`; full assessment → all five).
+
+```text
+what is the news for apple
+```
+
+Follow-ups reuse `logs/session.json` and the disk cache:
+
+```powershell
+python -c "from src.memory import ask_agent_a; print(ask_agent_a('what is the news for apple')['tool_calls']); print(ask_agent_a('What is the latest price?')['from_memory'])"
+```
+
+## Run Agent A (Task 3 notebook)
+
+In `task3.ipynb` paste the assessment prompt, a messy question, or a bare name/ticker:
 
 ```text
 Analyse the current financial health and market sentiment of apple.
 Identify the top three risks to its share price over the next 90 days
 and suggest one data-driven hedge strategy.
 ```
-
-A bare `apple` / `NVDA` is expanded into that same task.
 
 Cell 1 installs deps and puts `src` on `sys.path`.  
 The Agent A cell needs `GROQ_API_KEY`. Copy Task 1’s key:

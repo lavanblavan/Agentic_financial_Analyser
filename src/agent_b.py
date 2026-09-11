@@ -21,6 +21,7 @@ from src.agent_a import (
 from src.config import load_settings, missing_key_help, project_root
 from src.groq_client import LLMNotConfiguredError
 from src.schemas import CritiqueDecision, DataBrief, FinalReport, RiskFactor
+from src.task_profile import infer_task_profile
 from src.ticker import parse_research_query
 from src.tools import calculate_volatility, get_news, llm_sentiment, web_search
 
@@ -42,6 +43,7 @@ class TwoAgentState(TypedDict, total=False):
     query: str
     ticker: str
     company_name: str
+    task_mode: str
     brief: dict[str, Any]
     critique: dict[str, Any]
     critiques: list[dict[str, Any]]
@@ -61,8 +63,27 @@ def _as_brief(payload: dict[str, Any] | DataBrief) -> DataBrief:
     return DataBrief.model_validate(payload)
 
 
-def brief_gaps(brief: DataBrief) -> list[str]:
+def brief_gaps(brief: DataBrief, mode: str = "full_research") -> list[str]:
     """Deterministic holes a critic must not ignore. Not a tool-call order."""
+    if mode == "news":
+        return [] if brief.headlines else ["news"]
+    if mode == "price":
+        return [] if brief.current_price else ["price"]
+    if mode == "volatility":
+        gaps: list[str] = []
+        if brief.vol_30d_pct in (None, 0.0) and brief.vol_90d_pct is None:
+            gaps.append("vol")
+        return gaps
+    if mode == "sentiment":
+        gaps = []
+        if not brief.headlines:
+            gaps.append("news")
+        if brief.sentiment_label == "neutral" and brief.sentiment_score == 0.0 and not brief.headlines:
+            gaps.append("sentiment")
+        return gaps
+    if mode == "adaptive":
+        return []
+
     gaps: list[str] = []
     if brief.vol_90d_pct is None:
         gaps.append("vol_90")
@@ -169,8 +190,8 @@ def _llm_review(brief: DataBrief, gaps: list[str]) -> dict[str, Any] | None:
         return None
 
 
-def critique_brief(brief: DataBrief, revisions: int = 0) -> CritiqueDecision:
-    gaps = brief_gaps(brief)
+def critique_brief(brief: DataBrief, revisions: int = 0, mode: str = "full_research") -> CritiqueDecision:
+    gaps = brief_gaps(brief, mode=mode)
     if revisions >= MAX_REVISIONS or not gaps:
         notes = _llm_review(brief, gaps) or {}
         return CritiqueDecision(
@@ -352,16 +373,19 @@ def build_two_agent_graph():
         return {
             "ticker": result["ticker"],
             "company_name": result["parsed"]["name"],
+            "task_mode": result.get("task_mode") or "full_research",
             "brief": result["brief"],
             "agent_a": {
                 "tool_calls": result.get("tool_calls"),
                 "missing_after_run": result.get("missing_after_run"),
+                "task_mode": result.get("task_mode"),
             },
         }
 
     def critic(state: TwoAgentState) -> dict[str, Any]:
         brief = _as_brief(state["brief"])
-        decision = critique_brief(brief, revisions=int(state.get("revisions") or 0))
+        mode = str(state.get("task_mode") or "full_research")
+        decision = critique_brief(brief, revisions=int(state.get("revisions") or 0), mode=mode)
         trail = list(state.get("critiques") or [])
         trail.append(decision.model_dump())
         return {"critique": decision.model_dump(), "critiques": trail}
@@ -414,11 +438,13 @@ def run_two_agents(
 ) -> dict[str, Any]:
     """Agent A research → Agent B critique loop → FinalReport."""
     parsed = parse_research_query(query)
+    profile = infer_task_profile(query)
     graph = build_two_agent_graph()
     seed: TwoAgentState = {
         "query": query,
         "ticker": parsed["ticker"],
         "company_name": parsed["name"],
+        "task_mode": str(profile["mode"]),
         "revisions": 0,
         "critiques": [],
         "extra_facts": {},
@@ -426,9 +452,11 @@ def run_two_agents(
     if agent_a_result and agent_a_result.get("brief"):
         seed["brief"] = agent_a_result["brief"]
         seed["ticker"] = agent_a_result.get("ticker") or parsed["ticker"]
+        seed["task_mode"] = str(agent_a_result.get("task_mode") or profile["mode"])
         seed["agent_a"] = {
             "tool_calls": agent_a_result.get("tool_calls"),
             "missing_after_run": agent_a_result.get("missing_after_run"),
+            "task_mode": agent_a_result.get("task_mode"),
         }
     result = graph.invoke(seed, config={"recursion_limit": recursion_limit})
     report = result.get("report")

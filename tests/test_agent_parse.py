@@ -1,14 +1,21 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agent_a import _extract_json_object, missing_observations, _parse_brief
+from src.task_profile import FULL_RESEARCH
 
 
 def test_missing_observations_lists_required_tools():
     messages = [HumanMessage(content="go")]
-    missing = missing_observations(messages)
+    missing = missing_observations(messages, FULL_RESEARCH)
     assert "get_price_data" in missing
     assert "get_news" in missing
     assert any("90" in item for item in missing)
+
+
+def test_missing_observations_respects_news_only_profile():
+    messages = [HumanMessage(content="go")]
+    missing = missing_observations(messages, ["get_news"])
+    assert missing == ["get_news"]
 
 
 def test_missing_observations_clears_when_tools_ran():
@@ -24,7 +31,7 @@ def test_missing_observations_clears_when_tools_ran():
             ],
         )
     ]
-    assert missing_observations(messages) == []
+    assert missing_observations(messages, FULL_RESEARCH) == []
 
 
 def test_extract_json_from_prose():

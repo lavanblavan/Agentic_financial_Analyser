@@ -189,6 +189,7 @@ def remember(result: dict[str, Any], session: dict[str, Any] | None = None) -> d
         session["tickers"][ticker] = {
             "ts": _now(),
             "query": result.get("query"),
+            "task_mode": result.get("task_mode"),
             "brief": result.get("brief"),
             "report": result.get("report"),
             "followup_answer": result.get("followup_answer"),
@@ -505,6 +506,33 @@ def answer_followup(query: str, session: dict[str, Any] | None = None) -> dict[s
         "revisions": 0,
         "critiques": [],
     }
+    remember(result, session)
+    return result
+
+
+def ask_agent_a(query: str) -> dict[str, Any]:
+    """Task 2 entry: Agent A only, with session memory and disk tool cache.
+
+    Follow-ups on the same issuer reuse the stored brief and call only gap tools.
+    New questions run Agent A, which picks tools based on the question.
+    """
+    session = load_session()
+    plan = relate(query, session)
+    stored = recall(plan.get("ticker") or session.get("last_ticker"), session)
+
+    if plan["related"] and plan["intent"] in {"recall", "extend", "refresh"} and stored and stored.get("brief"):
+        result = answer_followup(query, session)
+        result["memory"] = describe_memory()
+        return result
+
+    from src.agent_a import run_agent_a
+
+    result = run_agent_a(query)
+    result["from_memory"] = False
+    result["plan"] = plan
+    result["reused"] = []
+    result["need_tools"] = [step["tool"] for step in (result.get("tool_calls") or []) if step.get("tool")]
+    result["memory"] = describe_memory()
     remember(result, session)
     return result
 

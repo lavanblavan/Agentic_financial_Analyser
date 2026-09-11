@@ -1,7 +1,7 @@
 """Agent A: quantitative researcher with a LangGraph ReAct tool loop.
 
-The LLM chooses tool order. The graph only nudges if required observations
-are still missing, then a finalize node writes a typed DataBrief.
+The LLM reads the user question and chooses which tools to call. The graph
+only nudges for observations required by that question's task profile.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from src.config import (
 )
 from src.groq_client import LLMNotConfiguredError
 from src.schemas import DataBrief, RiskFactor
+from src.task_profile import FULL_RESEARCH, infer_task_profile
 from src.ticker import parse_research_query
 from src.tools import ALL_TOOLS
 
@@ -42,6 +43,8 @@ class AgentAState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     ticker: str
     company_name: str
+    task_mode: str
+    required_observations: list[str]
     nudges: int
     brief: dict[str, Any]
 
@@ -77,26 +80,35 @@ def tool_call_sequence(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     return steps
 
 
-def missing_observations(messages: list[BaseMessage]) -> list[str]:
-    """Completeness check — not a call order. LLM still chooses sequence."""
+def missing_observations(
+    messages: list[BaseMessage],
+    required: list[str] | None = None,
+) -> list[str]:
+    """Check which required observations are still missing for this question."""
+    required = list(required if required is not None else FULL_RESEARCH)
+    if not required:
+        return []
+
     calls = tool_call_sequence(messages)
     names = [step["tool"] for step in calls]
-    missing: list[str] = []
-    if "get_price_data" not in names:
-        missing.append("get_price_data")
     windows = [
         int((step.get("args") or {}).get("window_days") or 30)
         for step in calls
         if step["tool"] == "calculate_volatility"
     ]
-    if not any(window <= 30 for window in windows):
+    missing: list[str] = []
+    if "get_price_data" in required and "get_price_data" not in names:
+        missing.append("get_price_data")
+    if "calculate_volatility:30" in required and not any(window <= 30 for window in windows):
         missing.append("calculate_volatility with window_days=30")
-    if not any(window >= 90 for window in windows):
+    if "calculate_volatility:90" in required and not any(window >= 90 for window in windows):
         missing.append("calculate_volatility with window_days=90")
-    if "get_news" not in names:
+    if "get_news" in required and "get_news" not in names:
         missing.append("get_news")
-    if "llm_sentiment" not in names:
+    if "llm_sentiment" in required and "llm_sentiment" not in names:
         missing.append("llm_sentiment")
+    if "web_search" in required and "web_search" not in names:
+        missing.append("web_search")
     return missing
 
 
@@ -105,7 +117,12 @@ def route_after_agent(state: AgentAState) -> str:
     last = messages[-1] if messages else None
     if isinstance(last, AIMessage) and last.tool_calls:
         return "tools"
-    if missing_observations(messages) and int(state.get("nudges") or 0) < MAX_NUDGES:
+    required = state.get("required_observations") or []
+    if (
+        required
+        and missing_observations(messages, required)
+        and int(state.get("nudges") or 0) < MAX_NUDGES
+    ):
         return "nudge"
     return "finalize"
 
@@ -324,15 +341,16 @@ def build_agent_a():
         return {"messages": [llm.invoke(state["messages"])]}
 
     def nudge_node(state: AgentAState) -> dict[str, Any]:
-        missing = missing_observations(state.get("messages") or [])
+        required = state.get("required_observations") or []
+        missing = missing_observations(state.get("messages") or [], required)
         return {
             "nudges": int(state.get("nudges") or 0) + 1,
             "messages": [
                 HumanMessage(
                     content=(
-                        "Do not finish yet. You still need observations from: "
+                        "Do not finish yet. This question still needs observations from: "
                         + ", ".join(missing)
-                        + ". Call those tools now. Do not hard-code an order, but do not skip them."
+                        + ". Call those tools now. You choose the order, but do not skip required ones."
                     )
                 )
             ],
@@ -398,22 +416,26 @@ def run_agent_a(
     question: str | None = None,
     recursion_limit: int = 20,
 ) -> dict[str, Any]:
-    """Run Agent A on the assessment prompt, or on a bare name/ticker."""
+    """Run Agent A on the user's question; it decides which tools to call."""
     parsed = parse_research_query(query)
+    profile = infer_task_profile(query)
     ticker = parsed["ticker"]
+    user_question = parsed["task"]
+    required = list(profile.get("required") or [])
     question = question or (
-        f"{parsed['task']}\n\n"
-        f"Resolved issuer: {parsed['name']} ({ticker}). "
-        "Use this ticker in every tool call. "
-        "You are not done until you have price, 30d vol, 90d vol, news, and sentiment. "
-        "Horizon for the three risks and the hedge is the next 90 days. "
-        "Ground the hedge in realized volatility. Use tools only as needed, but do not skip required facts."
+        f"User question: {user_question}\n\n"
+        f"Resolved issuer: {parsed['name']} ({ticker}).\n"
+        f"Task mode: {profile['mode']}.\n"
+        f"{profile['tool_guidance']}\n"
+        "Pick only the tools needed to answer the user question. You choose call order."
     )
     graph = build_agent_a()
     result = graph.invoke(
         {
             "ticker": ticker,
             "company_name": parsed["name"],
+            "task_mode": str(profile["mode"]),
+            "required_observations": required,
             "nudges": 0,
             "messages": [
                 SystemMessage(content=_system_prompt()),
@@ -430,10 +452,12 @@ def run_agent_a(
         "query": query,
         "parsed": parsed,
         "resolved": parsed,
+        "task_mode": profile["mode"],
+        "required_observations": required,
         "ticker": ticker,
         "question": question,
         "tool_calls": tool_call_sequence(messages),
-        "missing_after_run": missing_observations(messages),
+        "missing_after_run": missing_observations(messages, required),
         "final_text": final_text,
         "brief": brief,
         "messages": messages,
@@ -451,8 +475,9 @@ def format_answer(result: dict[str, Any]) -> str:
     """Readable notebook output: health, sentiment, 3 risks, one hedge."""
     brief = result.get("brief") or {}
     ticker = result.get("ticker") or brief.get("ticker") or "?"
+    mode = result.get("task_mode") or "research"
     lines = [
-        f"{ticker} — 90-day research brief",
+        f"{ticker} — {mode} brief",
         f"Price {brief.get('current_price')}  |  30d vol {brief.get('vol_30d_pct')}%  |  "
         f"90d vol {brief.get('vol_90d_pct')}%  |  momentum {brief.get('momentum')}",
         "",

@@ -1,6 +1,7 @@
 import json
 
 from src.memory import (
+    ask_agent_a,
     cache_get,
     cache_put,
     classify_intent,
@@ -92,3 +93,27 @@ def test_followup_uses_last_ticker_without_new_research(tmp_path, monkeypatch):
     )
     assert new_plan["related"] is False
     assert classify_intent(new_plan.get("previous_query") or "Analyse apple") == "research"
+
+
+def test_ask_agent_a_reuses_memory_for_followup(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.memory.SESSION_PATH", tmp_path / "session.json")
+    remember(
+        {
+            "query": "what is the news for apple",
+            "ticker": "AAPL",
+            "task_mode": "news",
+            "brief": {
+                "ticker": "AAPL",
+                "current_price": 200,
+                "vol_30d_pct": 22,
+                "momentum": "mixed",
+                "sentiment_score": 0.1,
+                "headlines": ["Apple launches iPhone 18 Pro"],
+            },
+        }
+    )
+    result = ask_agent_a("Remind me of the headlines.")
+    assert result["from_memory"] is True
+    assert result["need_tools"] == []
+    assert result.get("followup_answer")
+

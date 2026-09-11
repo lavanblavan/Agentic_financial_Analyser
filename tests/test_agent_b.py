@@ -59,6 +59,17 @@ def test_grounded_brief_has_no_gaps():
     assert brief_gaps(_brief()) == []
 
 
+def test_news_mode_only_checks_headlines():
+    brief = _brief(
+        vol_90d_pct=None,
+        hedge_strategy="",
+        quantitative_risks=[],
+        headlines=["Apple launches iPhone 18 Pro"],
+    )
+    assert brief_gaps(brief, mode="news") == []
+    assert brief_gaps(brief, mode="full_research")
+
+
 def test_final_report_marks_90d_vol():
     brief = _brief()
     report = report_from_brief(brief, [{"request_kind": "revise", "reason": "hedge"}], revisions=1)

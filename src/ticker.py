@@ -27,6 +27,27 @@ _STOP_TICKERS = {
     "RSI",
     "SMA",
     "MACD",
+    "WHAT",
+    "HOW",
+    "WHY",
+    "GET",
+    "ASK",
+}
+
+_GENERIC_SUBJECT = {
+    "analysis",
+    "company",
+    "financial",
+    "health",
+    "it",
+    "news",
+    "report",
+    "research",
+    "sentiment",
+    "summary",
+    "that",
+    "them",
+    "this",
 }
 
 _ALIASES = {
@@ -118,6 +139,61 @@ def ticker_mentioned(text: str) -> str | None:
     return None
 
 
+def _alias_in_text(raw: str) -> str | None:
+    lower = raw.lower()
+    for name in sorted(_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", lower):
+            return name
+    return None
+
+
+def _trailing_company(raw: str) -> str | None:
+    """Last 'of/for <name>' in a question, e.g. financial summary of tesla."""
+    matches = list(
+        re.finditer(
+            r"\b(?:of|for)\s+([A-Za-z][\w.&'-]*(?:\s+[A-Za-z][\w.&'-]*){0,4})",
+            raw,
+            flags=re.I,
+        )
+    )
+    if not matches:
+        return None
+    subject = matches[-1].group(1).strip(" .?'\"")
+    tokens = [part.lower() for part in re.findall(r"[a-z0-9]+", subject.lower())]
+    if not tokens or all(part in _GENERIC_SUBJECT for part in tokens):
+        return None
+    return subject
+
+
+def _llm_extract_company(text: str) -> str:
+    """Ask the LLM for the issuer name only. Yahoo still maps it to a ticker."""
+    from src.config import project_root
+    from src.groq_client import LLMNotConfiguredError, call_groq_json
+
+    prompt_path = project_root() / "prompts" / "extract_issuer.md"
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+    try:
+        payload = call_groq_json(system_prompt, text)
+    except LLMNotConfiguredError as err:
+        raise ValueError(
+            "Could not find a company in that text, and no LLM key is set to rewrite it. "
+            "Use a name/ticker (tesla, TSLA) or set OPENROUTER_API_KEY / GROQ_API_KEY."
+        ) from err
+    company = payload.get("company") if isinstance(payload, dict) else None
+    if company is None:
+        raise ValueError(
+            "Could not find a company in that text. "
+            "Use: Analyse ... of NVDA. ... or just type apple / AAPL."
+        )
+    subject = _clean_query(str(company))
+    if not subject or subject.lower() in {"null", "none"}:
+        raise ValueError(
+            "Could not find a company in that text. "
+            "Use: Analyse ... of NVDA. ... or just type apple / AAPL."
+        )
+    return subject
+
+
 def extract_subject(text: str) -> str:
     """Pull a company name or ticker out of a research prompt or a short label."""
     raw = _clean_query(text)
@@ -143,13 +219,24 @@ def extract_subject(text: str) -> str:
         if subject:
             return subject
 
-    if len(raw) < 48 and "analyse" not in raw.lower() and "analyze" not in raw.lower():
-        return raw
+    alias = _alias_in_text(raw)
+    if alias:
+        return alias
 
-    lower = raw.lower()
-    for name in sorted(_ALIASES, key=len, reverse=True):
-        if re.search(rf"\b{re.escape(name)}\b", lower):
-            return name
+    trailing = _trailing_company(raw)
+    if trailing:
+        return trailing
+
+    if _is_ticker_like(raw):
+        return raw.strip().upper().replace(".", "-")
+
+    words = raw.split()
+    if (
+        len(words) <= 4
+        and "analyse" not in raw.lower()
+        and "analyze" not in raw.lower()
+    ):
+        return raw
 
     for token in re.findall(r"\b[A-Z]{1,5}\b", raw):
         if token not in _STOP_TICKERS:
@@ -167,18 +254,33 @@ def _looks_like_full_task(text: str) -> bool:
 
 
 def parse_research_query(text: str) -> dict[str, str]:
-    """Accept the assessment prompt, or a bare name/ticker, and resolve the issuer."""
-    subject = extract_subject(text)
-    resolved = resolve_ticker(subject)
+    """Accept a messy question, the assessment prompt, or a bare name/ticker.
+
+    Rules extract the issuer when they can. If that fails, an LLM rewrites the
+    question down to a company name — Yahoo still maps the name to a ticker.
+    """
     raw = _clean_query(text)
+    extracted_via = "rules"
+    subject: str | None = None
+    resolved: dict[str, str] | None = None
+    try:
+        subject = extract_subject(raw)
+        resolved = resolve_ticker(subject)
+    except ValueError:
+        subject = _llm_extract_company(raw)
+        resolved = resolve_ticker(subject)
+        extracted_via = "llm"
+
     if _looks_like_full_task(raw):
         task = re.sub(r"\[[^\]]+\]", resolved["ticker"], raw)
     else:
-        task = DEFAULT_TASK.format(subject=f"{resolved['name']} ({resolved['ticker']})")
+        # Pass the user's wording through; Agent A decides which tools to call.
+        task = raw
     return {
         **resolved,
         "subject": subject,
         "task": task,
+        "extracted_via": extracted_via,
     }
 
 
