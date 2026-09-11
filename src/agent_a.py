@@ -22,7 +22,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from src.config import load_settings, missing_key_help, project_root
+from src.config import (
+    AGENT_MODEL_FALLBACKS,
+    load_settings,
+    missing_key_help,
+    project_root,
+)
 from src.groq_client import LLMNotConfiguredError
 from src.schemas import DataBrief, RiskFactor
 from src.ticker import parse_research_query
@@ -210,11 +215,39 @@ def _brief_from_facts(
     )
 
 
-def _chat(model: str, api_key: str, tools: bool = False) -> Any:
-    llm = ChatGroq(model=model, api_key=api_key, temperature=0.1)
-    if tools:
-        return llm.bind_tools(ALL_TOOLS)
-    return llm
+def _is_missing_model_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "model_not_found" in text or "does not exist" in text or "error code: 404" in text
+
+
+class FallbackChat:
+    """Bind tools on the first Groq model that still exists for this API key."""
+
+    def __init__(self, preferred: str, api_key: str, tools: bool = True):
+        ordered = [preferred, *AGENT_MODEL_FALLBACKS]
+        self.models = list(dict.fromkeys(ordered))
+        self.api_key = api_key
+        self.tools = tools
+        self.active = preferred
+
+    def _llm(self, model: str):
+        llm = ChatGroq(model=model, api_key=self.api_key, temperature=0.1)
+        return llm.bind_tools(ALL_TOOLS) if self.tools else llm
+
+    def invoke(self, messages):
+        last_error: Exception | None = None
+        start = self.models.index(self.active) if self.active in self.models else 0
+        for model in self.models[start:] + self.models[:start]:
+            try:
+                result = self._llm(model).invoke(messages)
+                self.active = model
+                return result
+            except Exception as exc:
+                if _is_missing_model_error(exc):
+                    last_error = exc
+                    continue
+                raise
+        raise last_error or RuntimeError("No Groq chat model available")
 
 
 def build_agent_a():
@@ -222,7 +255,7 @@ def build_agent_a():
     if not settings.llm_ready:
         raise LLMNotConfiguredError(missing_key_help(settings))
 
-    llm = _chat(settings.groq_agent_model, settings.groq_api_key or "", tools=True)
+    llm = FallbackChat(settings.groq_agent_model, settings.groq_api_key or "", tools=True)
 
     def agent_node(state: AgentAState) -> dict[str, Any]:
         return {"messages": [llm.invoke(state["messages"])]}
@@ -249,10 +282,10 @@ def build_agent_a():
         payload = _extract_json_object(last_text)
         if payload is None:
             try:
-                synthesizer = ChatGroq(
-                    model=settings.groq_agent_model,
-                    api_key=settings.groq_api_key,
-                    temperature=0.1,
+                synthesizer = FallbackChat(
+                    settings.groq_agent_model,
+                    settings.groq_api_key or "",
+                    tools=False,
                 )
                 reply = synthesizer.invoke(
                     [

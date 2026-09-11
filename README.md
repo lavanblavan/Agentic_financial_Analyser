@@ -24,7 +24,7 @@ Each call is logged to `logs/agent_trace.jsonl` (name, inputs, truncated output,
 
 The LLM must pick tools at runtime. Do not hard-code a call sequence.
 
-Agent A uses `GROQ_AGENT_MODEL` (default `llama-3.3-70b-versatile`) for the tool loop. `openai/gpt-oss-20b` is a reasoning model: it often stops after one or two tools and writes prose instead of JSON, so the brief looks empty. Keep gpt-oss for `llm_sentiment` if you want; do not use it as the ReAct model.
+Agent A uses `GROQ_AGENT_MODEL` (default `qwen/qwen3.6-27b`). Groq shut down `llama-3.3-70b-versatile` on 16 Aug 2026; retired IDs are remapped automatically. If Qwen is missing, the loop falls back to `openai/gpt-oss-120b` then `openai/gpt-oss-20b`.
 
 ## Local setup
 

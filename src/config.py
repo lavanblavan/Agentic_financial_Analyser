@@ -58,6 +58,26 @@ def normalize_secret(value: str | None) -> str | None:
     return text or None
 
 
+RETIRED_GROQ_MODELS = {
+    "llama-3.3-70b-versatile": "qwen/qwen3.6-27b",
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+    "llama-3.1-70b-versatile": "qwen/qwen3.6-27b",
+}
+
+# Groq's Llama 3.3 replacement, then OSS fallbacks if a preview ID is unavailable.
+DEFAULT_AGENT_MODEL = "qwen/qwen3.6-27b"
+AGENT_MODEL_FALLBACKS = (
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+)
+
+
+def canonical_groq_model(model: str | None) -> str:
+    raw = (model or DEFAULT_AGENT_MODEL).strip()
+    return RETIRED_GROQ_MODELS.get(raw, raw)
+
+
 def groq_key_shape(api_key: str | None) -> str:
     if not api_key:
         return "missing"
@@ -104,14 +124,10 @@ def load_settings() -> Settings:
         if load_dotenv:
             load_dotenv(project_root() / ".env", override=False)
 
-    json_model = get_secret("GROQ_MODEL") or "openai/gpt-oss-20b"
-    agent_model = get_secret("GROQ_AGENT_MODEL")
-    if not agent_model:
-        # Reasoning models (gpt-oss) stop after 1–2 tools and often skip JSON.
-        if "gpt-oss" in json_model.lower():
-            agent_model = "llama-3.3-70b-versatile"
-        else:
-            agent_model = json_model
+    json_model = canonical_groq_model(get_secret("GROQ_MODEL") or "openai/gpt-oss-20b")
+    agent_model = canonical_groq_model(
+        get_secret("GROQ_AGENT_MODEL") or DEFAULT_AGENT_MODEL
+    )
 
     return Settings(
         ticker=(get_secret("TICKER") or "NVDA").upper(),
