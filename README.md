@@ -4,12 +4,16 @@ Repo: [lavanblavan/Agentic_financial_Analyser](https://github.com/lavanblavan/Ag
 
 Tools are reused from Task 1 ([Financial_AI](https://github.com/lavanblavan/Financial_AI.git)); the agent layer chooses when to call them.
 
-## Notebooks
+## Notebook
 
-| Task | Notebook | Colab |
-|---|---|---|
-| **Task 2** — Agent A + memory | `task2.ipynb` | [Open in Colab](https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task2.ipynb) |
-| **Task 3** — Agent A + B + memory | `task3.ipynb` | [Open in Colab](https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task3.ipynb) |
+**`task3.ipynb`** runs the full agentic pipeline:
+
+| Section | What it runs |
+|---|---|
+| Research agent (A) | `ask_agent_a` — tool selection + session memory |
+| Critic agent (B) | `run_two_agents` + `ask` — critique loop + full-pipeline memory |
+
+[Open in Colab](https://colab.research.google.com/github/lavanblavan/Agentic_financial_Analyser/blob/main/task3.ipynb)
 
 Cell 1 clones this repo into `/content`, installs `requirements.txt`, then imports `src`. Opening a notebook from GitHub does **not** copy `src/` with it — the clone step is required.
 
@@ -44,9 +48,9 @@ copy .env.example .env
 
 Put `OPENROUTER_API_KEY` in `.env` (preferred). Optional: `GROQ_API_KEY` as fallback. Never commit `.env`.
 
-## Task 2 — Agent A + memory
+## Research agent + memory
 
-In `task2.ipynb` ask in plain language. Agent A reads the question and picks tools (news-only → `get_news`; full assessment → all five).
+In `task3.ipynb`, ask in plain language. The research agent reads the question and picks tools (news-only → `get_news`; full research → all five).
 
 ```text
 what is the news for apple
@@ -58,9 +62,9 @@ Follow-ups reuse `logs/session.json` and the disk cache:
 python -c "from src.memory import ask_agent_a; print(ask_agent_a('what is the news for apple')['tool_calls']); print(ask_agent_a('What is the latest price?')['from_memory'])"
 ```
 
-## Run Agent A (Task 3 notebook)
+## Critic agent + full pipeline
 
-In `task3.ipynb` paste the assessment prompt, a messy question, or a bare name/ticker:
+In `task3.ipynb`, paste a research prompt, a messy question, or a bare name/ticker:
 
 ```text
 Analyse the current financial health and market sentiment of apple.

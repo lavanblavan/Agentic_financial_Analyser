@@ -37,3 +37,20 @@ def test_adaptive_for_open_questions():
     profile = infer_task_profile("tell me how apple compares to peers on growth")
     assert profile["mode"] == "adaptive"
     assert profile["required"] == []
+
+
+def test_volatility_90d_question():
+    profile = infer_task_profile("what is the 90 day volatility of microsoft")
+    assert profile["mode"] == "volatility"
+    assert "calculate_volatility:90" in profile["required"]
+
+
+def test_messy_summary_maps_to_news_or_adaptive():
+    profile = infer_task_profile("what is the financial summary of tesla")
+    assert profile["mode"] in {"news", "adaptive", "price"}
+
+
+def test_small_cap_news_question():
+    profile = infer_task_profile("what is the news for enphase")
+    assert profile["mode"] == "news"
+    assert profile["required"] == ["get_news"]
