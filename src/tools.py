@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
 
 from src.config import project_root
 from src.data import fetch_prices
@@ -26,6 +27,44 @@ def _symbol(query: str) -> str:
 
 def _dumps(payload: Any) -> str:
     return json.dumps(payload, default=str)
+
+
+def _normalize_headlines(headlines: Any) -> str:
+    """Accept a title list, get_news JSON, or a raw string. Groq often sends an array."""
+    if headlines is None or headlines == "":
+        return "none"
+    if isinstance(headlines, str):
+        text = headlines.strip()
+        if not text:
+            return "none"
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return _normalize_headlines(json.loads(text))
+            except json.JSONDecodeError:
+                return text
+        return text
+    if isinstance(headlines, dict):
+        items = headlines.get("headlines", headlines)
+        return _normalize_headlines(items)
+    if isinstance(headlines, list):
+        lines: list[str] = []
+        for item in headlines:
+            if isinstance(item, dict):
+                title = str(item.get("title") or "").strip()
+                if title:
+                    lines.append(title)
+            elif item:
+                lines.append(str(item).strip())
+        return "\n".join(lines) if lines else "none"
+    return str(headlines)
+
+
+class SentimentArgs(BaseModel):
+    ticker: str = Field(description="Company name or ticker, e.g. AAPL or apple")
+    headlines: list[str] = Field(
+        default_factory=list,
+        description="Headline title strings from get_news (a list, not a JSON string).",
+    )
 
 
 @traced
@@ -66,11 +105,11 @@ def _get_news(ticker: str, min_items: int = 8) -> str:
 
 
 @traced
-def _llm_sentiment(ticker: str, headlines: str = "") -> str:
-    """Score news sentiment from -1 to 1. Pass headlines from get_news. Accepts a name or ticker."""
+def _llm_sentiment(ticker: str, headlines: list[str] | None = None) -> str:
+    """Score news sentiment from -1 to 1. headlines must be a list of title strings."""
     symbol = _symbol(ticker)
     prompt = (project_root() / "prompts" / "sentiment.md").read_text(encoding="utf-8")
-    user = f"TICKER: {symbol}\nHEADLINES:\n{headlines or 'none'}"
+    user = f"TICKER: {symbol}\nHEADLINES:\n{_normalize_headlines(headlines)}"
     payload = call_groq_json(prompt, user)
     score = payload.get("sentiment_score", 0.0)
     try:
@@ -153,10 +192,12 @@ get_news = StructuredTool.from_function(
 llm_sentiment = StructuredTool.from_function(
     func=_llm_sentiment,
     name="llm_sentiment",
+    args_schema=SentimentArgs,
     description=(
         "Score headline sentiment from -1 (bearish) to 1 (bullish). "
         "ticker may be a company name or symbol. "
-        "Pass the headline JSON or text returned by get_news."
+        "Pass headlines as a list of title strings from get_news, e.g. "
+        "[\"Apple launches iPhone 18 Pro\", \"...\"]. Do not pass a JSON string."
     ),
 )
 

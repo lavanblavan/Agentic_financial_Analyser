@@ -13,7 +13,7 @@ You are NOT finished until you have ALL of these observations:
 - calculate_volatility window_days=30
 - calculate_volatility window_days=90  (risk horizon is 90 days)
 - get_news
-- llm_sentiment (pass the headline JSON from get_news)
+- llm_sentiment (pass headlines as a list of title strings, not a JSON blob)
 Call web_search only if news is thin or conflicting.
 
 Do not write the DataBrief JSON until those facts are in the tool results.
