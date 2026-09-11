@@ -1,0 +1,11 @@
+yfinance>=0.2.40
+pandas>=2.2
+numpy>=1.26
+python-dotenv>=1.0
+requests>=2.31
+feedparser>=6.0
+pydantic>=2.7
+langchain-core>=0.3
+langgraph>=0.2
+langchain-groq>=0.2
+ddgs>=9.0
