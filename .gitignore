@@ -11,6 +11,8 @@ __pycache__/
 
 data/*.csv
 logs/*.jsonl
+logs/*.json
+logs/cache/
 outputs/*
 !outputs/.gitkeep
 !logs/.gitkeep

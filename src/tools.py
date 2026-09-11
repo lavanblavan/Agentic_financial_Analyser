@@ -17,6 +17,7 @@ from src.data import fetch_prices
 from src.groq_client import call_groq_json
 from src.indicators import add_indicators, latest_snapshot, realized_vol_pct
 from src.news import fetch_news, search_news_query
+from src.memory import disk_cached
 from src.ticker import resolve_ticker
 from src.tracing import traced
 
@@ -68,6 +69,7 @@ class SentimentArgs(BaseModel):
 
 
 @traced
+@disk_cached
 def _get_price_data(ticker: str, period: str = "1y") -> str:
     """Latest price plus SMA/RSI/MACD/Bollinger snapshot. Accepts 'apple' or 'AAPL'."""
     symbol = _symbol(ticker)
@@ -77,6 +79,7 @@ def _get_price_data(ticker: str, period: str = "1y") -> str:
 
 
 @traced
+@disk_cached
 def _calculate_volatility(ticker: str, window_days: int = 30, period: str = "1y") -> str:
     """Annualized realized volatility (%) over window_days. Use 30 or 90. Accepts a name or ticker."""
     window = int(window_days)
@@ -97,6 +100,7 @@ def _calculate_volatility(ticker: str, window_days: int = 30, period: str = "1y"
 
 
 @traced
+@disk_cached
 def _get_news(ticker: str, min_items: int = 8) -> str:
     """Recent headlines from Yahoo Finance, with Google News RSS fallback. Accepts a name or ticker."""
     symbol = _symbol(ticker)
@@ -105,6 +109,7 @@ def _get_news(ticker: str, min_items: int = 8) -> str:
 
 
 @traced
+@disk_cached
 def _llm_sentiment(ticker: str, headlines: list[str] | None = None) -> str:
     """Score news sentiment from -1 to 1. headlines must be a list of title strings."""
     symbol = _symbol(ticker)
@@ -126,6 +131,7 @@ def _llm_sentiment(ticker: str, headlines: list[str] | None = None) -> str:
 
 
 @traced
+@disk_cached
 def _web_search(query: str, max_results: int = 5) -> str:
     """Search the open web for analyst views, catalysts, or recent events."""
     results = _ddg_search(query, max_results=int(max_results))

@@ -165,6 +165,17 @@ def parse_research_query(text: str) -> dict[str, str]:
     }
 
 
+def normalize_symbol(query: str) -> str:
+    """Map apple/AAPL to AAPL without a network call. Used for cache keys."""
+    raw = _clean_query(query)
+    alias = _ALIASES.get(_normalize_name(raw))
+    if alias:
+        return alias
+    if _is_ticker_like(raw):
+        return raw.strip().upper().replace(".", "-")
+    return raw.upper()
+
+
 def resolve_ticker(query: str) -> dict[str, str]:
     """Map 'apple', 'AAPL', or 'nvidia' to a ticker the tools can fetch.
 

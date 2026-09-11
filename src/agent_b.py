@@ -432,7 +432,7 @@ def run_two_agents(
         }
     result = graph.invoke(seed, config={"recursion_limit": recursion_limit})
     report = result.get("report")
-    return {
+    payload = {
         "query": query,
         "parsed": parsed,
         "ticker": result.get("ticker") or parsed["ticker"],
@@ -444,6 +444,13 @@ def run_two_agents(
         "report": report,
         "agent_a": result.get("agent_a") or {},
     }
+    try:
+        from src.memory import remember
+
+        remember(payload)
+    except Exception:
+        pass
+    return payload
 
 
 def format_final_report(result: dict[str, Any]) -> str:

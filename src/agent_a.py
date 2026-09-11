@@ -426,7 +426,7 @@ def run_agent_a(
     last = messages[-1]
     final_text = _message_text(last)
     brief = result.get("brief") or (_parse_brief(final_text).model_dump() if _parse_brief(final_text) else None)
-    return {
+    payload = {
         "query": query,
         "parsed": parsed,
         "resolved": parsed,
@@ -438,6 +438,13 @@ def run_agent_a(
         "brief": brief,
         "messages": messages,
     }
+    try:
+        from src.memory import remember
+
+        remember(payload)
+    except Exception:
+        pass
+    return payload
 
 
 def format_answer(result: dict[str, Any]) -> str:

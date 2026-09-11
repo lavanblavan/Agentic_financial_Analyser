@@ -84,10 +84,22 @@ Agent B will request `calculate_volatility(window_days=90)` if that number is mi
 python -c "from src.agent_b import format_final_report, run_two_agents; r = run_two_agents('Analyse the current financial health and market sentiment of apple. Identify the top three risks to its share price over the next 90 days and suggest one data-driven hedge strategy.'); print(format_final_report(r))"
 ```
 
+## Memory
+
+Two layers:
+
+1. **Short-term session** — last ticker, `DataBrief`, `FinalReport`, and turns in `logs/session.json`.
+2. **Persistent tool cache** — price / vol / news / sentiment / search in `logs/cache/` (15–30 min TTL). A second run for `apple` / `AAPL` does not re-hit Yahoo.
+
+`ask("Remind me of the hedge.")` answers from session memory and does not call tools. A full research prompt for the same ticker reuses a fresh brief when one exists.
+
+```powershell
+python -c "from src.memory import ask, describe_memory; print(ask('Remind me of the hedge.')['followup_answer']); print(describe_memory())"
+```
+
 ## Next slices
 
-1. Short-term state + disk cache for follow-ups
-2. Optional Streamlit trace dashboard
+1. Optional Streamlit trace dashboard
 
 ## Environment rule
 

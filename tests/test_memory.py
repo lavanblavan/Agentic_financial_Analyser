@@ -1,0 +1,70 @@
+import json
+
+from src.memory import (
+    cache_get,
+    cache_put,
+    describe_memory,
+    disk_cached,
+    is_followup,
+    load_session,
+    recall,
+    remember,
+)
+from src.ticker import normalize_symbol
+
+
+def test_normalize_symbol_does_not_need_network():
+    assert normalize_symbol("apple") == "AAPL"
+    assert normalize_symbol("AAPL") == "AAPL"
+
+
+def test_disk_cache_hit_marks_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.memory.CACHE_DIR", tmp_path)
+    calls = {"n": 0}
+
+    @disk_cached
+    def _get_price_data(ticker: str, period: str = "1y") -> str:
+        calls["n"] += 1
+        return json.dumps({"ticker": ticker, "close": 10})
+
+    first = json.loads(_get_price_data("AAPL"))
+    second = json.loads(_get_price_data("apple"))
+    assert calls["n"] == 1
+    assert first.get("cached") is None
+    assert second["cached"] is True
+    assert second["close"] == 10
+
+
+def test_cache_expires(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.memory.CACHE_DIR", tmp_path)
+    args = {"ticker": "AAPL", "period": "1y"}
+    cache_put("_get_price_data", args, json.dumps({"close": 1}))
+    assert cache_get("_get_price_data", args, ttl=60) is not None
+    assert cache_get("_get_price_data", args, ttl=-1) is None
+
+
+def test_followup_uses_last_ticker_without_new_research(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.memory.SESSION_PATH", tmp_path / "session.json")
+    remember(
+        {
+            "query": "Analyse apple ...",
+            "ticker": "AAPL",
+            "brief": {"ticker": "AAPL", "current_price": 1, "vol_30d_pct": 2, "momentum": "mixed", "sentiment_score": 0},
+            "report": {"hedge_or_strategy": "90d put"},
+        }
+    )
+    session = load_session()
+    assert is_followup("Remind me of the hedge.", session)
+    assert is_followup("what is the hedge?", session)
+    assert not is_followup(
+        "Analyse the current financial health and market sentiment of tesla. "
+        "Identify the top three risks to its share price over the next 90 days "
+        "and suggest one data-driven hedge strategy.",
+        session,
+    )
+    stored = recall("apple", session)
+    assert stored is not None
+    assert stored["report"]["hedge_or_strategy"] == "90d put"
+    status = describe_memory(session)
+    assert status["last_ticker"] == "AAPL"
+    assert status["brief_cached"] is True

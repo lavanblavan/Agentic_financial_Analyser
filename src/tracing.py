@@ -43,6 +43,16 @@ def read_trace(limit: int = 40) -> list[dict[str, Any]]:
     return rows
 
 
+def _result_was_cached(result: Any) -> bool:
+    if not isinstance(result, str):
+        return False
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(data, dict) and data.get("cached"))
+
+
 def traced(fn: Callable) -> Callable:
     """Log tool name, inputs, truncated output, duration, and errors."""
 
@@ -58,6 +68,7 @@ def traced(fn: Callable) -> Callable:
         try:
             result = fn(*args, **kwargs)
             record["output"] = _truncate(result)
+            record["cached"] = _result_was_cached(result)
             return result
         except Exception as exc:
             record["ok"] = False
