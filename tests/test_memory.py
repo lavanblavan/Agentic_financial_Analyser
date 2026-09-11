@@ -3,19 +3,23 @@ import json
 from src.memory import (
     cache_get,
     cache_put,
+    classify_intent,
     describe_memory,
     disk_cached,
     is_followup,
     load_session,
     recall,
+    relate,
     remember,
 )
-from src.ticker import normalize_symbol
+from src.ticker import normalize_symbol, ticker_mentioned
 
 
 def test_normalize_symbol_does_not_need_network():
     assert normalize_symbol("apple") == "AAPL"
     assert normalize_symbol("AAPL") == "AAPL"
+    assert ticker_mentioned("Remind me of the hedge.") is None
+    assert ticker_mentioned("what about tesla") == "TSLA"
 
 
 def test_disk_cache_hit_marks_cached(tmp_path, monkeypatch):
@@ -68,3 +72,23 @@ def test_followup_uses_last_ticker_without_new_research(tmp_path, monkeypatch):
     status = describe_memory(session)
     assert status["last_ticker"] == "AAPL"
     assert status["brief_cached"] is True
+
+    recall_plan = relate("Remind me of the hedge.", session)
+    assert recall_plan["related"] is True
+    assert recall_plan["intent"] == "recall"
+    assert recall_plan["need_tools"] == []
+    assert "hedge" in recall_plan["reuse"]
+
+    refresh_plan = relate("What is the latest AAPL price?", session)
+    assert refresh_plan["related"] is True
+    assert refresh_plan["intent"] == "refresh"
+    assert "get_price_data" in refresh_plan["need_tools"]
+
+    new_plan = relate(
+        "Analyse the current financial health and market sentiment of tesla. "
+        "Identify the top three risks to its share price over the next 90 days "
+        "and suggest one data-driven hedge strategy.",
+        session,
+    )
+    assert new_plan["related"] is False
+    assert classify_intent(new_plan.get("previous_query") or "Analyse apple") == "research"

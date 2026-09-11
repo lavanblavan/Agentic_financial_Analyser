@@ -91,7 +91,7 @@ Two layers:
 1. **Short-term session** — last ticker, `DataBrief`, `FinalReport`, and turns in `logs/session.json`.
 2. **Persistent tool cache** — price / vol / news / sentiment / search in `logs/cache/` (15–30 min TTL). A second run for `apple` / `AAPL` does not re-hit Yahoo.
 
-`ask("Remind me of the hedge.")` answers from session memory and does not call tools. A full research prompt for the same ticker reuses a fresh brief when one exists.
+`ask()` compares the new question to the last one. Same issuer → reuse price/vol/news/risks/hedge from the stored brief. Tools run only for the gap (`latest` → price, `catalyst` → web_search). A different issuer (apple → tesla) starts a new research run.
 
 ```powershell
 python -c "from src.memory import ask, describe_memory; print(ask('Remind me of the hedge.')['followup_answer']); print(describe_memory())"

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.config import project_root
-from src.ticker import normalize_symbol
+from src.ticker import normalize_symbol, ticker_mentioned
 
 CACHE_DIR = project_root() / "logs" / "cache"
 SESSION_PATH = project_root() / "logs" / "session.json"
@@ -33,9 +33,17 @@ TOOL_TTL_SECONDS = {
 BRIEF_TTL_SECONDS = 45 * 60
 MAX_TURNS = 20
 
-_FOLLOWUP = re.compile(
-    r"\b(hedge|remind|again|previous|last (run|report|brief)|same (one|ticker|name)|"
-    r"why (that|those|the)|those risks|the risks|what about|follow[- ]?up)\b",
+_RECALL = re.compile(
+    r"\b(hedge|risks?|sentiment|remind|again|previous|you said|last (run|report|brief)|"
+    r"same (one|ticker|name)|why (that|those|the)|those|what about|follow[- ]?up)\b",
+    re.I,
+)
+_REFRESH = re.compile(
+    r"\b(latest|update|refresh|right now|today'?s price|now what)\b",
+    re.I,
+)
+_EXTEND = re.compile(
+    r"\b(search|catalyst|analyst|more news|what happened|tariff|earnings|why is)\b",
     re.I,
 )
 
@@ -183,9 +191,15 @@ def remember(result: dict[str, Any], session: dict[str, Any] | None = None) -> d
             "query": result.get("query"),
             "brief": result.get("brief"),
             "report": result.get("report"),
+            "followup_answer": result.get("followup_answer"),
             "tool_calls": result.get("tool_calls") or (result.get("agent_a") or {}).get("tool_calls") or [],
         }
     session["last_query"] = result.get("query")
+    session["last_answer"] = (
+        result.get("followup_answer")
+        or (result.get("report") or {}).get("hedge_or_strategy")
+        or (result.get("brief") or {}).get("hedge_strategy")
+    )
     turns = list(session.get("turns") or [])
     turns.append(
         {
@@ -193,6 +207,10 @@ def remember(result: dict[str, Any], session: dict[str, Any] | None = None) -> d
             "query": result.get("query"),
             "ticker": ticker,
             "from_memory": bool(result.get("from_memory")),
+            "related": (result.get("plan") or {}).get("related"),
+            "intent": (result.get("plan") or {}).get("intent"),
+            "need_tools": result.get("need_tools") or [],
+            "reused": result.get("reused") or [],
             "revisions": result.get("revisions"),
         }
     )
@@ -201,21 +219,116 @@ def remember(result: dict[str, Any], session: dict[str, Any] | None = None) -> d
     return session
 
 
-def is_followup(query: str, session: dict[str, Any] | None = None) -> bool:
-    session = session or load_session()
-    if not session.get("last_ticker"):
-        return False
+def classify_intent(query: str) -> str:
     text = (query or "").strip()
-    if not text:
-        return False
     lower = text.lower()
     if "analyse" in lower or "analyze" in lower:
-        return False
-    if _FOLLOWUP.search(text):
-        return True
-    if len(text) < 90 and "?" in text:
-        return True
-    return False
+        return "research"
+    if _REFRESH.search(text):
+        return "refresh"
+    if _EXTEND.search(text):
+        return "extend"
+    if _RECALL.search(text):
+        return "recall"
+    if "?" in text or len(text) < 90:
+        return "recall"
+    return "research"
+
+
+def _reuse_from_store(stored: dict[str, Any] | None) -> list[str]:
+    if not stored:
+        return []
+    brief = stored.get("brief") or {}
+    report = stored.get("report") or {}
+    reused: list[str] = []
+    if brief.get("current_price") is not None:
+        reused.append("price")
+    if brief.get("vol_30d_pct") is not None:
+        reused.append("vol_30")
+    if brief.get("vol_90d_pct") is not None:
+        reused.append("vol_90")
+    if brief.get("headlines"):
+        reused.append("news")
+    if brief.get("sentiment_label") or brief.get("sentiment_score") is not None:
+        reused.append("sentiment")
+    if brief.get("quantitative_risks") or report.get("top_risks"):
+        reused.append("risks")
+    if brief.get("hedge_strategy") or report.get("hedge_or_strategy"):
+        reused.append("hedge")
+    return reused
+
+
+def _need_tools(intent: str, stored: dict[str, Any] | None, query: str) -> list[str]:
+    brief = (stored or {}).get("brief") or {}
+    if intent == "recall":
+        return []
+    if intent == "refresh":
+        tools = ["get_price_data"]
+        if re.search(r"\b(vol|volatility)\b", query, re.I):
+            tools.append("calculate_volatility")
+        return tools
+    if intent == "extend":
+        tools: list[str] = ["web_search"]
+        if not brief.get("headlines"):
+            tools.insert(0, "get_news")
+        return tools
+    if intent == "research" and stored and _fresh(stored):
+        return []
+    return []
+
+
+def relate(query: str, session: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compare the new question to the last one. Decide what to reuse vs fetch."""
+    session = session or load_session()
+    last_ticker = session.get("last_ticker")
+    last_query = session.get("last_query")
+    mentioned = ticker_mentioned(query)
+    intent = classify_intent(query)
+    if not last_ticker:
+        return {
+            "related": False,
+            "ticker": mentioned,
+            "previous_query": last_query,
+            "intent": intent if mentioned else "research",
+            "reuse": [],
+            "need_tools": [],
+            "reason": "No prior question in session.",
+        }
+    ticker = mentioned or last_ticker
+    same = normalize_symbol(str(ticker)) == normalize_symbol(str(last_ticker))
+    stored = recall(last_ticker, session) if same else None
+    if not same:
+        return {
+            "related": False,
+            "ticker": mentioned,
+            "previous_query": last_query,
+            "intent": "research",
+            "reuse": [],
+            "need_tools": [],
+            "reason": f"New issuer {mentioned} is not the last one ({last_ticker}).",
+        }
+    reuse = _reuse_from_store(stored)
+    need = _need_tools(intent, stored, query)
+    reason = {
+        "recall": "Same issuer; answer from the stored brief and last report.",
+        "refresh": "Same issuer; reuse the brief and refresh the requested market facts.",
+        "extend": "Same issuer; reuse the brief and fetch only the extra context.",
+        "research": "Same issuer; reuse a fresh brief instead of starting over.",
+    }.get(intent, "Same issuer.")
+    return {
+        "related": True,
+        "ticker": last_ticker,
+        "previous_query": last_query,
+        "intent": intent,
+        "reuse": reuse,
+        "need_tools": need,
+        "reason": reason,
+    }
+
+
+def is_followup(query: str, session: dict[str, Any] | None = None) -> bool:
+    plan = relate(query, session)
+    return bool(plan["related"] and plan["intent"] in {"recall", "extend", "refresh"})
 
 
 def describe_memory(session: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -258,12 +371,72 @@ def _answer_from_store(query: str, stored: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def answer_followup(query: str, session: dict[str, Any] | None = None) -> dict[str, Any]:
-    session = session or load_session()
-    stored = recall(session.get("last_ticker"), session)
-    if not stored or not stored.get("brief"):
-        raise ValueError("No stored brief yet. Run a full research prompt first.")
-    text = _answer_from_store(query, stored)
+def _run_needed_tools(ticker: str, need_tools: list[str], query: str, stored: dict[str, Any]) -> dict[str, Any]:
+    """Call only the tools the relatedness plan asked for."""
+    from src.tools import calculate_volatility, get_news, get_price_data, llm_sentiment, web_search
+
+    facts: dict[str, Any] = {}
+    brief = stored.get("brief") or {}
+    if "get_price_data" in need_tools:
+        raw = get_price_data.invoke({"ticker": ticker})
+        facts["price"] = json.loads(raw) if isinstance(raw, str) else raw
+    if "calculate_volatility" in need_tools:
+        raw30 = calculate_volatility.invoke({"ticker": ticker, "window_days": 30})
+        raw90 = calculate_volatility.invoke({"ticker": ticker, "window_days": 90})
+        facts["vol_30"] = json.loads(raw30) if isinstance(raw30, str) else raw30
+        facts["vol_90"] = json.loads(raw90) if isinstance(raw90, str) else raw90
+    if "get_news" in need_tools:
+        raw = get_news.invoke({"ticker": ticker})
+        facts["news"] = json.loads(raw) if isinstance(raw, str) else raw
+    if "web_search" in need_tools:
+        search_q = query if len(query.split()) >= 4 else f"{ticker} {query} 90 day risks"
+        raw = web_search.invoke({"query": search_q, "max_results": 5})
+        facts["web_search"] = json.loads(raw) if isinstance(raw, str) else raw
+    if "llm_sentiment" in need_tools:
+        headlines = brief.get("headlines") or []
+        news = facts.get("news") or {}
+        if news.get("headlines"):
+            headlines = [
+                str(item.get("title"))
+                for item in news["headlines"]
+                if isinstance(item, dict) and item.get("title")
+            ]
+        raw = llm_sentiment.invoke({"ticker": ticker, "headlines": headlines})
+        facts["sentiment"] = json.loads(raw) if isinstance(raw, str) else raw
+    return facts
+
+
+def _merge_facts(brief: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(brief)
+    price = facts.get("price") or {}
+    if price.get("close") is not None:
+        updated["current_price"] = price["close"]
+    if price.get("momentum_bias"):
+        updated["momentum"] = price["momentum_bias"]
+    if price.get("rsi_14") is not None:
+        updated["rsi_14"] = price["rsi_14"]
+    if (facts.get("vol_30") or {}).get("vol_pct") is not None:
+        updated["vol_30d_pct"] = facts["vol_30"]["vol_pct"]
+    if (facts.get("vol_90") or {}).get("vol_pct") is not None:
+        updated["vol_90d_pct"] = facts["vol_90"]["vol_pct"]
+    news = facts.get("news") or {}
+    if news.get("headlines"):
+        updated["headlines"] = [
+            str(item.get("title"))
+            for item in news["headlines"]
+            if isinstance(item, dict) and item.get("title")
+        ][:8]
+    sentiment = facts.get("sentiment") or {}
+    if sentiment.get("sentiment_score") is not None:
+        updated["sentiment_score"] = sentiment["sentiment_score"]
+        updated["sentiment_label"] = sentiment.get("label") or updated.get("sentiment_label")
+    return updated
+
+
+def _llm_answer(query: str, stored: dict[str, Any], facts: dict[str, Any], plan: dict[str, Any]) -> str:
+    fallback = _answer_from_store(query, stored)
+    if facts:
+        fallback += "\n\nNew tool facts:\n" + json.dumps(facts, default=str)[:2000]
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -271,41 +444,64 @@ def answer_followup(query: str, session: dict[str, Any] | None = None) -> dict[s
         from src.config import load_settings
 
         settings = load_settings()
-        if settings.llm_ready:
-            llm = FallbackChat(settings, tools=False)
-            reply = llm.invoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "Answer the follow-up using only the stored DataBrief and FinalReport. "
-                            "Do not invent new prices. If they ask for the hedge or risks, quote them. "
-                            "Say you used session memory and did not call tools."
-                        )
-                    ),
-                    HumanMessage(
-                        content=(
-                            f"Question: {query}\n\n"
-                            f"Brief: {json.dumps(stored.get('brief'), default=str)[:8000]}\n"
-                            f"Report: {json.dumps(stored.get('report'), default=str)[:8000]}"
-                        )
-                    ),
-                ]
-            )
-            content = getattr(reply, "content", "")
-            if isinstance(content, str) and content.strip():
-                extracted = _extract_json_object(content)
-                text = extracted.get("answer") if extracted and extracted.get("answer") else content.strip()
+        if not settings.llm_ready:
+            return fallback
+        llm = FallbackChat(settings, tools=False)
+        reply = llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are answering a follow-up. Previous question and its DataBrief/"
+                        "FinalReport are memory. Reuse those numbers. Use new tool facts only "
+                        "to fill gaps. Do not invent prices. State what you reused and which "
+                        "tools you ran."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"Previous question: {plan.get('previous_query')}\n"
+                        f"New question: {query}\n"
+                        f"Plan: related={plan.get('related')} intent={plan.get('intent')} "
+                        f"reuse={plan.get('reuse')} need_tools={plan.get('need_tools')}\n"
+                        f"Brief: {json.dumps(stored.get('brief'), default=str)[:8000]}\n"
+                        f"Report: {json.dumps(stored.get('report'), default=str)[:8000]}\n"
+                        f"New facts: {json.dumps(facts, default=str)[:4000]}"
+                    )
+                ),
+            ]
+        )
+        content = getattr(reply, "content", "")
+        if isinstance(content, str) and content.strip():
+            extracted = _extract_json_object(content)
+            return extracted.get("answer") if extracted and extracted.get("answer") else content.strip()
     except Exception:
         pass
+    return fallback
+
+
+def answer_followup(query: str, session: dict[str, Any] | None = None) -> dict[str, Any]:
+    session = session or load_session()
+    plan = relate(query, session)
+    stored = recall(plan.get("ticker") or session.get("last_ticker"), session)
+    if not stored or not stored.get("brief"):
+        raise ValueError("No stored brief yet. Run a full research prompt first.")
+    need = list(plan.get("need_tools") or [])
+    facts = _run_needed_tools(str(plan.get("ticker") or session.get("last_ticker")), need, query, stored) if need else {}
+    brief = _merge_facts(stored.get("brief") or {}, facts)
+    stored = {**stored, "brief": brief}
+    text = _llm_answer(query, stored, facts, plan)
     result = {
         "query": query,
-        "ticker": session.get("last_ticker"),
+        "ticker": plan.get("ticker") or session.get("last_ticker"),
         "from_memory": True,
-        "reused": ["brief", "report"],
-        "brief": stored.get("brief"),
+        "plan": plan,
+        "reused": plan.get("reuse") or ["brief", "report"],
+        "need_tools": need,
+        "extra_facts": facts,
+        "brief": brief,
         "report": stored.get("report"),
         "followup_answer": text,
-        "tool_calls": [],
+        "tool_calls": [{"tool": name, "cached": (facts.get(name) or {}).get("cached")} for name in need],
         "revisions": 0,
         "critiques": [],
     }
@@ -314,27 +510,33 @@ def answer_followup(query: str, session: dict[str, Any] | None = None) -> dict[s
 
 
 def ask(query: str, agent_a_result: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Memory-aware entry: follow-up from disk, or a full A+B run that then persists."""
+    """Memory-aware entry: relate to the last question, reuse facts, fetch only gaps."""
     session = load_session()
-    if is_followup(query, session) and recall(session.get("last_ticker"), session):
-        return answer_followup(query, session)
+    plan = relate(query, session)
+    stored = recall(plan.get("ticker") or session.get("last_ticker"), session)
+
+    if plan["related"] and plan["intent"] in {"recall", "extend", "refresh"} and stored and stored.get("brief"):
+        result = answer_followup(query, session)
+        result["memory"] = describe_memory()
+        return result
 
     from src.agent_b import run_two_agents
     from src.ticker import parse_research_query
 
     parsed = parse_research_query(query)
     reused = agent_a_result
-    if reused is None:
-        stored = recall(parsed["ticker"], session)
-        if stored and stored.get("brief") and _fresh(stored):
-            reused = {
-                "brief": stored["brief"],
-                "ticker": parsed["ticker"],
-                "tool_calls": stored.get("tool_calls") or [],
-                "missing_after_run": [],
-            }
+    if reused is None and plan["related"] and stored and stored.get("brief") and _fresh(stored):
+        reused = {
+            "brief": stored["brief"],
+            "ticker": parsed["ticker"],
+            "tool_calls": stored.get("tool_calls") or [],
+            "missing_after_run": [],
+        }
     result = run_two_agents(query, agent_a_result=reused)
     result["from_memory"] = bool(reused and not agent_a_result)
+    result["plan"] = plan
+    result["reused"] = plan.get("reuse") if reused else []
+    result["need_tools"] = [] if reused else ["full_research"]
     result["memory"] = describe_memory()
     remember(result)
     return result

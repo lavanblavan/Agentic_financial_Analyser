@@ -101,6 +101,23 @@ def _pick_equity(quotes: list[dict]) -> dict | None:
     return None
 
 
+def ticker_mentioned(text: str) -> str | None:
+    """Find a known issuer in text without a network call. None if only pronouns."""
+    raw = _clean_query(text)
+    if not raw:
+        return None
+    lower = raw.lower()
+    for name in sorted(_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", lower):
+            return _ALIASES[name]
+    for token in re.findall(r"\b[A-Z]{1,5}(?:[.-][A-Z]{1,2})?\b", raw):
+        if token in _STOP_TICKERS or token in PLACEHOLDER_TOKENS:
+            continue
+        if _is_ticker_like(token):
+            return token.strip().upper().replace(".", "-")
+    return None
+
+
 def extract_subject(text: str) -> str:
     """Pull a company name or ticker out of a research prompt or a short label."""
     raw = _clean_query(text)
