@@ -1,4 +1,4 @@
-"""JSON chat client: Groq first, optional OpenRouter on 429."""
+"""JSON chat client: OpenRouter first when a key is set, else Groq."""
 
 from __future__ import annotations
 
@@ -21,6 +21,20 @@ class GroqAPIError(RuntimeError):
 def call_groq_json(system_prompt: str, user_content: str, settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
     last_error: Exception | None = None
+    if settings.openrouter_api_key:
+        try:
+            return _chat_json(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                api_key=settings.openrouter_api_key,
+                model=settings.openrouter_model,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                max_tokens=settings.max_tokens,
+            )
+        except GroqAPIError as exc:
+            last_error = exc
+            if not settings.groq_api_key:
+                raise
     if settings.groq_api_key:
         try:
             return _chat_json(
@@ -29,26 +43,17 @@ def call_groq_json(system_prompt: str, user_content: str, settings: Settings | N
                 model=settings.groq_model,
                 system_prompt=system_prompt,
                 user_content=user_content,
-                max_tokens=settings.max_tokens,
+                max_tokens=min(settings.max_tokens, 800),
             )
-        except GroqAPIError as exc:
-            last_error = exc
-            if "429" not in str(exc) or not settings.openrouter_api_key:
-                raise
-    if settings.openrouter_api_key:
-        return _chat_json(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            api_key=settings.openrouter_api_key,
-            model=settings.openrouter_model,
-            system_prompt=system_prompt,
-            user_content=user_content,
-            max_tokens=settings.max_tokens,
-        )
+        except GroqAPIError:
+            if last_error:
+                raise last_error
+            raise
     if last_error:
         raise last_error
     raise LLMNotConfiguredError(
-        "No LLM key found. Local: set GROQ_API_KEY in .env "
-        "(optional OPENROUTER_API_KEY). Colab: add Secrets and grant access."
+        "No LLM key found. Local: set OPENROUTER_API_KEY in .env "
+        "(optional GROQ_API_KEY). Colab: add Secrets and grant access."
     )
 
 

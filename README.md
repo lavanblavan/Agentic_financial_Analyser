@@ -24,9 +24,9 @@ Each call is logged to `logs/agent_trace.jsonl` (name, inputs, truncated output,
 
 The LLM must pick tools at runtime. Do not hard-code a call sequence.
 
-Agent A uses `openai/gpt-oss-20b` on Groq with `max_tokens=800` so free-tier OTPM (1000) is not exceeded. Qwen 3.6 preview rejects requests that ask for more than 1000 output tokens.
+If `OPENROUTER_API_KEY` is set, Agent A uses [OpenRouter](https://openrouter.ai/keys) first (`openai/gpt-oss-120b:free`, then Llama 3.3 70B free, then `gpt-oss-20b:free`, then `openai/gpt-4o-mini` if the key has credits). Groq is only the fallback.
 
-Optional [OpenRouter](https://openrouter.ai/keys) fallback: set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL=openai/gpt-oss-20b:free`). The agent uses it if Groq returns 404 or 429.
+Without OpenRouter, Groq `openai/gpt-oss-20b` is used with `max_tokens=800` so free-tier OTPM (1000) is not exceeded.
 
 ## Local setup
 
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-Put `GROQ_API_KEY` in `.env` (same key as Task 1). Get one at https://console.groq.com/keys
+Put `OPENROUTER_API_KEY` in `.env` (preferred). Optional: `GROQ_API_KEY` as fallback. Never commit `.env`.
 
 ## Run Agent A (notebook)
 

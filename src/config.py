@@ -64,15 +64,23 @@ RETIRED_GROQ_MODELS = {
     "llama-3.1-70b-versatile": "openai/gpt-oss-20b",
 }
 
-# Free-tier Groq: gpt-oss-20b (Task 1). Qwen preview OTPM is 1000 and 429s if max_tokens is higher.
+# Groq free OTPM is 1000; keep Groq completions under that. OpenRouter is not capped the same way.
 DEFAULT_AGENT_MODEL = "openai/gpt-oss-20b"
 AGENT_MAX_TOKENS = 800
+OPENROUTER_MAX_TOKENS = 2048
 AGENT_MODEL_FALLBACKS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
     "qwen/qwen3.6-27b",
 )
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-20b:free"
+# OpenRouter first when a key is present. 120B free is stronger at tool calling than 20B.
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL_FALLBACKS = (
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "openai/gpt-oss-20b:free",
+    "openai/gpt-4o-mini",
+)
 
 
 def canonical_groq_model(model: str | None) -> str:
@@ -119,6 +127,10 @@ class Settings:
     def llm_ready(self) -> bool:
         return bool(self.groq_api_key or self.openrouter_api_key)
 
+    @property
+    def prefer_openrouter(self) -> bool:
+        return bool(self.openrouter_api_key)
+
 
 def load_settings() -> Settings:
     if not running_in_colab():
@@ -142,7 +154,10 @@ def load_settings() -> Settings:
         groq_agent_model=agent_model,
         openrouter_api_key=get_secret("OPENROUTER_API_KEY"),
         openrouter_model=get_secret("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL,
-        max_tokens=int(get_secret("LLM_MAX_TOKENS") or AGENT_MAX_TOKENS),
+        max_tokens=int(
+            get_secret("LLM_MAX_TOKENS")
+            or (OPENROUTER_MAX_TOKENS if get_secret("OPENROUTER_API_KEY") else AGENT_MAX_TOKENS)
+        ),
     )
 
 
@@ -162,8 +177,8 @@ def describe_env(settings: Settings) -> dict[str, str]:
         "ticker": settings.ticker,
         "lookback": settings.lookback,
         "llm_provider": provider,
-        "llm_model": settings.groq_model,
-        "agent_model": settings.groq_agent_model,
+        "llm_model": settings.openrouter_model if settings.prefer_openrouter else settings.groq_model,
+        "agent_model": settings.openrouter_model if settings.prefer_openrouter else settings.groq_agent_model,
         "openrouter_model": settings.openrouter_model,
         "openrouter_key_present": "yes" if settings.openrouter_api_key else "no",
         "max_tokens": str(settings.max_tokens),
@@ -181,11 +196,11 @@ def missing_key_help(settings: Settings) -> str:
         return ""
     if running_in_colab():
         return (
-            "No LLM key found. Add GROQ_API_KEY (and optionally OPENROUTER_API_KEY) "
+            "No LLM key found. Add OPENROUTER_API_KEY (preferred) or GROQ_API_KEY "
             "under the key icon and enable Notebook access."
         )
     return (
-        "No LLM key found. Local: set GROQ_API_KEY in .env "
-        "(optional OPENROUTER_API_KEY as fallback). "
+        "No LLM key found. Local: set OPENROUTER_API_KEY in .env "
+        "(optional GROQ_API_KEY as fallback). "
         "Colab: add the same names in Secrets and grant access."
     )

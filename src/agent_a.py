@@ -23,7 +23,9 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from src.config import (
+    AGENT_MAX_TOKENS,
     AGENT_MODEL_FALLBACKS,
+    OPENROUTER_MODEL_FALLBACKS,
     load_settings,
     missing_key_help,
     project_root,
@@ -231,32 +233,45 @@ def _is_capacity_error(exc: Exception) -> bool:
     )
 
 
+def _is_router_retryable(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        _is_missing_model_error(exc)
+        or _is_capacity_error(exc)
+        or "402" in text
+        or "no endpoints" in text
+        or "insufficient" in text
+        or "payment required" in text
+    )
+
+
 class FallbackChat:
-    """Groq models first (capped max_tokens), then optional OpenRouter."""
+    """OpenRouter first when a key is set; Groq is the fallback."""
 
     def __init__(self, settings, tools: bool = True):
-        preferred = settings.groq_agent_model
-        ordered = [preferred, *AGENT_MODEL_FALLBACKS]
-        self.groq_models = list(dict.fromkeys(ordered))
+        preferred_groq = settings.groq_agent_model
+        self.groq_models = list(dict.fromkeys([preferred_groq, *AGENT_MODEL_FALLBACKS]))
+        preferred_router = settings.openrouter_model
+        self.router_models = list(dict.fromkeys([preferred_router, *OPENROUTER_MODEL_FALLBACKS]))
         self.settings = settings
         self.tools = tools
-        self.active = preferred
-        self.provider = "groq"
+        self.active = preferred_router if settings.prefer_openrouter else preferred_groq
+        self.provider = "openrouter" if settings.prefer_openrouter else "groq"
 
     def _groq(self, model: str):
         llm = ChatGroq(
             model=model,
             api_key=self.settings.groq_api_key,
             temperature=0.1,
-            max_tokens=self.settings.max_tokens,
+            max_tokens=min(self.settings.max_tokens, AGENT_MAX_TOKENS),
         )
         return llm.bind_tools(ALL_TOOLS) if self.tools else llm
 
-    def _openrouter(self):
+    def _openrouter(self, model: str):
         from langchain_openai import ChatOpenAI
 
         llm = ChatOpenAI(
-            model=self.settings.openrouter_model,
+            model=model,
             api_key=self.settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
             temperature=0.1,
@@ -270,9 +285,21 @@ class FallbackChat:
 
     def invoke(self, messages):
         last_error: Exception | None = None
+        if self.settings.openrouter_api_key:
+            start = self.router_models.index(self.active) if self.active in self.router_models else 0
+            for model in self.router_models[start:] + self.router_models[:start]:
+                try:
+                    result = self._openrouter(model).invoke(messages)
+                    self.active = model
+                    self.provider = "openrouter"
+                    return result
+                except Exception as exc:
+                    if _is_router_retryable(exc):
+                        last_error = exc
+                        continue
+                    raise
         if self.settings.groq_api_key:
-            start = self.groq_models.index(self.active) if self.active in self.groq_models else 0
-            for model in self.groq_models[start:] + self.groq_models[:start]:
+            for model in self.groq_models:
                 try:
                     result = self._groq(model).invoke(messages)
                     self.active = model
@@ -283,15 +310,7 @@ class FallbackChat:
                         last_error = exc
                         continue
                     raise
-        if self.settings.openrouter_api_key:
-            try:
-                result = self._openrouter().invoke(messages)
-                self.active = self.settings.openrouter_model
-                self.provider = "openrouter"
-                return result
-            except Exception as exc:
-                last_error = exc
-        raise last_error or RuntimeError("No chat model available (Groq/OpenRouter)")
+        raise last_error or RuntimeError("No chat model available (OpenRouter/Groq)")
 
 
 def build_agent_a():
