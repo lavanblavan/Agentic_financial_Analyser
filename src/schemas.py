@@ -31,10 +31,15 @@ class DataBrief(BaseModel):
     notes: str = ""
 
 
+RequestKind = Literal["vol_90", "web_search", "news", "sentiment", "revise"]
+
+
 class CritiqueDecision(BaseModel):
     need_more_data: bool
     request: str | None = None
+    request_kind: RequestKind | None = None
     reason: str
+    issues: list[str] = Field(default_factory=list)
 
 
 class FinalReport(BaseModel):
@@ -44,4 +49,6 @@ class FinalReport(BaseModel):
     top_risks: list[RiskFactor]
     hedge_or_strategy: str
     used_90d_vol: bool = False
+    critique_rounds: int = 0
+    critic_notes: str = ""
     brief: DataBrief

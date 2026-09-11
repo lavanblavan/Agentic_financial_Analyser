@@ -62,7 +62,7 @@ copy .env.example .env
 
 Then edit `.env` and paste `GROQ_API_KEY=gsk_...`
 
-What to look for: the **tool call order**, then health / sentiment / three 90-day risks / one hedge.
+What to look for: the **tool call order**, then Agent B’s critique trail (request → new fact → revised brief), then the final report.
 
 CLI equivalent:
 
@@ -70,11 +70,24 @@ CLI equivalent:
 python -c "from src.agent_a import format_answer, run_agent_a; r = run_agent_a('Analyse the current financial health and market sentiment of apple. Identify the top three risks to its share price over the next 90 days and suggest one data-driven hedge strategy.'); print(r['tool_calls']); print(format_answer(r))"
 ```
 
+## Two agents
+
+Handoff is typed: `DataBrief` → `CritiqueDecision` → updated `DataBrief` → `FinalReport`. No raw strings across the A→B boundary.
+
+```text
+researcher (Agent A) → critic (Agent B) → fulfill one request → revise → critic → publish
+```
+
+Agent B will request `calculate_volatility(window_days=90)` if that number is missing. If 90d vol is present but risks are generic or the hedge ignores 90d vol, it asks for `web_search` or a revise. At most two critique rounds.
+
+```powershell
+python -c "from src.agent_b import format_final_report, run_two_agents; r = run_two_agents('Analyse the current financial health and market sentiment of apple. Identify the top three risks to its share price over the next 90 days and suggest one data-driven hedge strategy.'); print(format_final_report(r))"
+```
+
 ## Next slices
 
-1. Agent B critique → request 90d vol → incorporate
-2. Short-term state + disk cache for follow-ups
-3. Optional Streamlit trace dashboard
+1. Short-term state + disk cache for follow-ups
+2. Optional Streamlit trace dashboard
 
 ## Environment rule
 
