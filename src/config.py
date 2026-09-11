@@ -88,6 +88,7 @@ class Settings:
     lookback: str
     groq_api_key: str | None
     groq_model: str
+    groq_agent_model: str
 
     @property
     def llm_ready(self) -> bool:
@@ -103,11 +104,21 @@ def load_settings() -> Settings:
         if load_dotenv:
             load_dotenv(project_root() / ".env", override=False)
 
+    json_model = get_secret("GROQ_MODEL") or "openai/gpt-oss-20b"
+    agent_model = get_secret("GROQ_AGENT_MODEL")
+    if not agent_model:
+        # Reasoning models (gpt-oss) stop after 1–2 tools and often skip JSON.
+        if "gpt-oss" in json_model.lower():
+            agent_model = "llama-3.3-70b-versatile"
+        else:
+            agent_model = json_model
+
     return Settings(
         ticker=(get_secret("TICKER") or "NVDA").upper(),
         lookback=get_secret("LOOKBACK") or "1y",
         groq_api_key=get_secret("GROQ_API_KEY"),
-        groq_model=get_secret("GROQ_MODEL") or "openai/gpt-oss-20b",
+        groq_model=json_model,
+        groq_agent_model=agent_model,
     )
 
 
@@ -120,6 +131,7 @@ def describe_env(settings: Settings) -> dict[str, str]:
         "lookback": settings.lookback,
         "llm_provider": "groq",
         "llm_model": settings.groq_model,
+        "agent_model": settings.groq_agent_model,
         "llm_key_present": "yes" if settings.llm_ready else "no",
         "groq_key_shape": groq_key_shape(settings.groq_api_key),
     }

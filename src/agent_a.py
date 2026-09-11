@@ -1,39 +1,220 @@
 """Agent A: quantitative researcher with a LangGraph ReAct tool loop.
 
-The LLM chooses tools. should_continue routes to tools if the model emitted
-tool calls, otherwise END. No hard-coded tool sequence.
+The LLM chooses tool order. The graph only nudges if required observations
+are still missing, then a finalize node writes a typed DataBrief.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
 from src.config import load_settings, missing_key_help, project_root
 from src.groq_client import LLMNotConfiguredError
-from src.schemas import DataBrief
+from src.schemas import DataBrief, RiskFactor
 from src.ticker import parse_research_query
 from src.tools import ALL_TOOLS
 
+MAX_NUDGES = 2
 
-class AgentAState(TypedDict):
+
+class AgentAState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     ticker: str
-
-
-def should_continue(state: AgentAState) -> str:
-    """After each agent step: run tools if the LLM asked for them, else stop."""
-    return tools_condition(state)
+    company_name: str
+    nudges: int
+    brief: dict[str, Any]
 
 
 def _system_prompt() -> str:
     return (project_root() / "prompts" / "agent_a.md").read_text(encoding="utf-8")
+
+
+def _message_text(message: BaseMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text") or block.get("content") or ""
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def tool_call_sequence(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        for call in message.tool_calls:
+            steps.append({"tool": call.get("name"), "args": call.get("args") or {}})
+    return steps
+
+
+def missing_observations(messages: list[BaseMessage]) -> list[str]:
+    """Completeness check — not a call order. LLM still chooses sequence."""
+    calls = tool_call_sequence(messages)
+    names = [step["tool"] for step in calls]
+    missing: list[str] = []
+    if "get_price_data" not in names:
+        missing.append("get_price_data")
+    windows = [
+        int((step.get("args") or {}).get("window_days") or 30)
+        for step in calls
+        if step["tool"] == "calculate_volatility"
+    ]
+    if not any(window <= 30 for window in windows):
+        missing.append("calculate_volatility with window_days=30")
+    if not any(window >= 90 for window in windows):
+        missing.append("calculate_volatility with window_days=90")
+    if "get_news" not in names:
+        missing.append("get_news")
+    if "llm_sentiment" not in names:
+        missing.append("llm_sentiment")
+    return missing
+
+
+def route_after_agent(state: AgentAState) -> str:
+    messages = state.get("messages") or []
+    last = messages[-1] if messages else None
+    if isinstance(last, AIMessage) and last.tool_calls:
+        return "tools"
+    if missing_observations(messages) and int(state.get("nudges") or 0) < MAX_NUDGES:
+        return "nudge"
+    return "finalize"
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?", "", raw).strip()
+        raw = raw.rstrip("`").strip()
+    try:
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _parse_brief(text: str) -> DataBrief | None:
+    payload = _extract_json_object(text)
+    if not payload:
+        return None
+    try:
+        return DataBrief.model_validate(payload)
+    except Exception:
+        return None
+
+
+def _tool_facts(messages: list[BaseMessage]) -> dict[str, Any]:
+    facts: dict[str, Any] = {"price": {}, "vol_30": {}, "vol_90": {}, "news": {}, "sentiment": {}}
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        try:
+            data = json.loads(message.content) if isinstance(message.content, str) else message.content
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = message.name or ""
+        if name == "get_price_data":
+            facts["price"] = data
+        elif name == "calculate_volatility":
+            window = int(data.get("window_days") or 30)
+            if window >= 90:
+                facts["vol_90"] = data
+            else:
+                facts["vol_30"] = data
+        elif name == "get_news":
+            facts["news"] = data
+        elif name == "llm_sentiment":
+            facts["sentiment"] = data
+    return facts
+
+
+def _brief_from_facts(
+    ticker: str,
+    company_name: str,
+    facts: dict[str, Any],
+    llm_payload: dict[str, Any] | None,
+) -> DataBrief:
+    payload = dict(llm_payload or {})
+    price = facts.get("price") or {}
+    vol30 = facts.get("vol_30") or {}
+    vol90 = facts.get("vol_90") or {}
+    news = facts.get("news") or {}
+    sentiment = facts.get("sentiment") or {}
+    headlines = payload.get("headlines") or [
+        str(item.get("title"))
+        for item in (news.get("headlines") or [])
+        if isinstance(item, dict) and item.get("title")
+    ][:6]
+    risks = payload.get("quantitative_risks") or []
+    parsed_risks: list[RiskFactor] = []
+    for risk in risks[:3]:
+        try:
+            parsed_risks.append(RiskFactor.model_validate(risk))
+        except Exception:
+            continue
+    score = payload.get("sentiment_score", sentiment.get("sentiment_score", 0.0))
+    try:
+        score = max(-1.0, min(1.0, float(score)))
+    except (TypeError, ValueError):
+        score = 0.0
+    close = payload.get("current_price", price.get("close"))
+    vol_30 = payload.get("vol_30d_pct", vol30.get("vol_pct"))
+    vol_90 = payload.get("vol_90d_pct", vol90.get("vol_pct"))
+    return DataBrief(
+        ticker=ticker,
+        company_name=str(payload.get("company_name") or company_name or ticker),
+        current_price=float(close or 0.0),
+        vol_30d_pct=float(vol_30 or 0.0),
+        vol_90d_pct=None if vol_90 in (None, "") else float(vol_90),
+        momentum=str(payload.get("momentum") or price.get("momentum_bias") or "mixed"),
+        rsi_14=payload.get("rsi_14") if payload.get("rsi_14") is not None else price.get("rsi_14"),
+        financial_health=str(payload.get("financial_health") or ""),
+        sentiment_score=score,
+        sentiment_label=str(payload.get("sentiment_label") or sentiment.get("label") or "neutral"),
+        headlines=[str(h) for h in headlines],
+        quantitative_risks=parsed_risks,
+        hedge_strategy=str(payload.get("hedge_strategy") or ""),
+        notes=str(payload.get("notes") or ""),
+    )
+
+
+def _chat(model: str, api_key: str, tools: bool = False) -> Any:
+    llm = ChatGroq(model=model, api_key=api_key, temperature=0.1)
+    if tools:
+        return llm.bind_tools(ALL_TOOLS)
+    return llm
 
 
 def build_agent_a():
@@ -41,52 +222,79 @@ def build_agent_a():
     if not settings.llm_ready:
         raise LLMNotConfiguredError(missing_key_help(settings))
 
-    llm = ChatGroq(
-        model=settings.groq_model,
-        api_key=settings.groq_api_key,
-        temperature=0.1,
-    ).bind_tools(ALL_TOOLS)
+    llm = _chat(settings.groq_agent_model, settings.groq_api_key or "", tools=True)
 
     def agent_node(state: AgentAState) -> dict[str, Any]:
         return {"messages": [llm.invoke(state["messages"])]}
 
+    def nudge_node(state: AgentAState) -> dict[str, Any]:
+        missing = missing_observations(state.get("messages") or [])
+        return {
+            "nudges": int(state.get("nudges") or 0) + 1,
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "Do not finish yet. You still need observations from: "
+                        + ", ".join(missing)
+                        + ". Call those tools now. Do not hard-code an order, but do not skip them."
+                    )
+                )
+            ],
+        }
+
+    def finalize_node(state: AgentAState) -> dict[str, Any]:
+        messages = state.get("messages") or []
+        facts = _tool_facts(messages)
+        last_text = _message_text(messages[-1]) if messages else ""
+        payload = _extract_json_object(last_text)
+        if payload is None:
+            try:
+                synthesizer = ChatGroq(
+                    model=settings.groq_agent_model,
+                    api_key=settings.groq_api_key,
+                    temperature=0.1,
+                )
+                reply = synthesizer.invoke(
+                    [
+                        SystemMessage(content=_system_prompt()),
+                        HumanMessage(
+                            content=(
+                                "Write the DataBrief JSON only. Use these tool facts; "
+                                "do not invent prices.\n"
+                                + json.dumps(facts, default=str)[:12000]
+                            )
+                        ),
+                    ]
+                )
+                payload = _extract_json_object(_message_text(reply))
+            except Exception:
+                payload = None
+        brief = _brief_from_facts(
+            ticker=state.get("ticker") or "UNKNOWN",
+            company_name=state.get("company_name") or "",
+            facts=facts,
+            llm_payload=payload,
+        )
+        return {
+            "brief": brief.model_dump(),
+            "messages": [AIMessage(content=brief.model_dump_json())],
+        }
+
     graph = StateGraph(AgentAState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", ToolNode(ALL_TOOLS))
+    graph.add_node("nudge", nudge_node)
+    graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", should_continue)
+    graph.add_conditional_edges(
+        "agent",
+        route_after_agent,
+        {"tools": "tools", "nudge": "nudge", "finalize": "finalize"},
+    )
     graph.add_edge("tools", "agent")
+    graph.add_edge("nudge", "agent")
+    graph.add_edge("finalize", END)
     return graph.compile()
-
-
-def tool_call_sequence(messages: list[BaseMessage]) -> list[dict[str, Any]]:
-    """Visible evidence that the LLM chose tools at runtime."""
-    steps: list[dict[str, Any]] = []
-    for message in messages:
-        if not isinstance(message, AIMessage) or not message.tool_calls:
-            continue
-        for call in message.tool_calls:
-            steps.append(
-                {
-                    "tool": call.get("name"),
-                    "args": call.get("args") or {},
-                }
-            )
-    return steps
-
-
-def _parse_brief(text: str) -> DataBrief | None:
-    raw = (text or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    try:
-        payload = json.loads(raw)
-        return DataBrief.model_validate(payload)
-    except Exception:
-        return None
 
 
 def run_agent_a(
@@ -96,7 +304,7 @@ def run_agent_a(
         "and suggest one data-driven hedge strategy."
     ),
     question: str | None = None,
-    recursion_limit: int = 12,
+    recursion_limit: int = 20,
 ) -> dict[str, Any]:
     """Run Agent A on the assessment prompt, or on a bare name/ticker."""
     parsed = parse_research_query(query)
@@ -105,14 +313,16 @@ def run_agent_a(
         f"{parsed['task']}\n\n"
         f"Resolved issuer: {parsed['name']} ({ticker}). "
         "Use this ticker in every tool call. "
+        "You are not done until you have price, 30d vol, 90d vol, news, and sentiment. "
         "Horizon for the three risks and the hedge is the next 90 days. "
-        "Ground the hedge in realized volatility and the risks you found. "
-        "Use tools only as needed."
+        "Ground the hedge in realized volatility. Use tools only as needed, but do not skip required facts."
     )
     graph = build_agent_a()
     result = graph.invoke(
         {
             "ticker": ticker,
+            "company_name": parsed["name"],
+            "nudges": 0,
             "messages": [
                 SystemMessage(content=_system_prompt()),
                 HumanMessage(content=question),
@@ -122,8 +332,8 @@ def run_agent_a(
     )
     messages = result["messages"]
     last = messages[-1]
-    final_text = last.content if isinstance(last.content, str) else str(last.content)
-    brief = _parse_brief(final_text)
+    final_text = _message_text(last)
+    brief = result.get("brief") or (_parse_brief(final_text).model_dump() if _parse_brief(final_text) else None)
     return {
         "query": query,
         "parsed": parsed,
@@ -131,8 +341,9 @@ def run_agent_a(
         "ticker": ticker,
         "question": question,
         "tool_calls": tool_call_sequence(messages),
+        "missing_after_run": missing_observations(messages),
         "final_text": final_text,
-        "brief": brief.model_dump() if brief else None,
+        "brief": brief,
         "messages": messages,
     }
 
@@ -165,4 +376,7 @@ def format_answer(result: dict[str, Any]) -> str:
         else:
             lines.append(f"  {i}. {risk}")
     lines.extend(["", "Data-driven hedge:", brief.get("hedge_strategy") or "(missing)"])
+    missing = result.get("missing_after_run") or []
+    if missing:
+        lines.extend(["", "Still missing tool observations:", ", ".join(missing)])
     return "\n".join(lines)
